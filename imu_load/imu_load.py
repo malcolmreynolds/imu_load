@@ -3,6 +3,16 @@ import os.path
 import numpy as np
 
 
+class TimestampedData(object):
+    def total_time(self):
+        """Returns the elapsed time in nanoseconds. This only makes
+        sense when we have a reading"""
+        return self.timestamps[-1] - self.timestamps[0]
+
+    def num_readings(self):
+        return self.timestamps.size
+
+
 class CameraParams(object):
     def __init__(self, fname):
         with open(fname, 'r') as f:
@@ -26,8 +36,23 @@ class CameraParams(object):
 
         return timestamp, phone, ret_vals
 
+    def num_readings(self):
+        return len(self.data)
 
-class Timestamped4Vec(object):
+    def total_time(self):
+        """Since we may not necessarily have two lines, need to be ready
+        for the possibility that we don't know how much time has passed."""
+        timestamps = [d[0] for d in self.data]
+
+        if len(timestamps) > 1:
+            return timestamps[-1] - timestamps[0]
+        else:
+            # return -1 if we only have one measurement, and therefore
+            # nothing to take difference between.
+            return -1
+
+
+class Timestamped4Vec(TimestampedData):
     def __init__(self, fname):
         with open(fname, 'r') as f:
             lines = f.readlines()
@@ -39,7 +64,9 @@ class Timestamped4Vec(object):
                              dtype=np.float64)
 
 
-class TimestampedMtx(object):
+
+
+class TimestampedMtx(TimestampedData):
     def __init__(self, fname):
         with open(fname, 'r') as f:
             lines = f.readlines()
@@ -64,7 +91,10 @@ class TimestampedMtx(object):
 class IMUSensorVideo(object):
     def __init__(self, vid_filename):
         self.vid_filename = vid_filename
+
         base_dir, vid_file_name = os.path.split(os.path.abspath(vid_filename))
+
+        self.sensor_files = []
 
         if not vid_file_name.lower().startswith("video-"):
             raise ValueError("expected filename to start with video-")
@@ -89,7 +119,18 @@ class IMUSensorVideo(object):
 
             full_fname = os.path.join(abs_metadata_dir, fname + vid_id + ".txt")
             print "handling %s with %s" % (full_fname, handler)
-            self.__dict__[python_name] = handler(full_fname)
+            h = handler(full_fname)
+
+            # Store both as an attribute and in a list so we can iterate over
+            # all the things which come from sensor files
+            self.__dict__[python_name] = h
+            self.sensor_files.append(h)
+
+    def load_video(self):
+        pass
+
+    def all_times_passed(self):
+        return [sf.total_time() for sf in self.sensor_files]
 
 
 class HTC1XVid(IMUSensorVideo):
@@ -113,3 +154,6 @@ class HTC1XVid(IMUSensorVideo):
     def __init__(self, vid_filename):
         super(HTC1XVid, self).__init__(vid_filename)
 
+    def rotation_matrix_at_time(self, time_ns):
+        """Get the rotation matrix at the given time in ns"""
+        pass
