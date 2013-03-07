@@ -9,8 +9,89 @@ class TimestampedData(object):
         sense when we have a reading"""
         return self.timestamps[-1] - self.timestamps[0]
 
+    def __len__(self):
+        return self.num_readings()
+
     def num_readings(self):
         return self.timestamps.size
+
+    def reading_at_time(self, time_in_ns):
+        """Given some NS time, return the measurement at a given time in
+        nanoseconds. doesn't perform interpolation, so if we don't have a
+        reading from that time, nothing will work."""
+
+        # Find indices to all the entries of self.timestamps
+        # which match the given time (there SHOULD be only one
+        # of these, we hope).
+        correct_indices = np.transpose(np.nonzero(self.timestamps == time_in_ns))
+        num_matches = correct_indices.shape[0]
+        if num_matches == 0:
+            # nothing round
+            raise ValueError("no entry for time %d" % time_in_ns)
+        elif num_matches > 1:
+            raise ValueError("multiple entries for timestamp %d" % time_in_ns)
+        else:
+            # We have exactly one match, which is what we want
+            correct_index = correct_indices[0, 0]
+
+        # Use our overloaded __getitem__ methods
+        return self[correct_index]
+
+    def check_time_in_range(self, time_in_ns):
+        """Makes sure time is valid"""
+        if not (self.timestamps[0] <= time_in_ns <= self.timestamps[-1]):
+            raise ValueError("time of %d ns is out of range" % time_in_ns)
+
+    def first_reading_below(self, time_in_ns):
+        """Return the value in nanoseconds and the index for the closest sample
+        to the asked for time, but earlier (or at the same time)"""
+
+        idx_below = np.nonzero(self.timestamps <= time_in_ns)[0].max()
+
+        return self.timestamps[idx_below], idx_below
+
+    def first_reading_above(self, time_in_ns):
+        """Return the value in nanoseconds and the index for the first sample we have
+        at a time strictly greater than"""
+
+        # Check for edge case - when we are asked for exactly the final timestamp
+        if time_in_ns == self.timestamps[-1]:
+            return time_in_ns, self.timestamps.size
+
+        # If we are here, then we know that since we have already tested for validity
+        # of the time, and we've checked that we aren't equal to the final time..
+        # therefore there will definitely be at least one timestamp greater than
+        # what we have
+        idx_above = np.nonzero(self.timestamps > time_in_ns)[0].min()
+
+        return self.timestamps[idx_above], idx_above
+
+    def interpolated_reading_at_time(self, time_in_ns):
+        """Linearly interpolate between datapoints given some time in nanoseconds.
+        Note that this does naive t * data[i] + (1-t)*data[i+1] which isn't correct
+        for rotation matrices. However James did this in his code and it worked out okay.."""
+
+        self.check_time_in_range(time_in_ns)
+
+        # Find the nanosecond readings above and below what has been requested
+        nanoseconds_above, nano_above_idx = self.first_reading_above(time_in_ns)
+        nanoseconds_below, nano_below_idx = self.first_reading_below(time_in_ns)
+
+        print ("want reading at %d, got [%d,%d] and [%d,%d]" %
+               (time_in_ns, nanoseconds_below, nano_below_idx,
+                nanoseconds_above, nano_above_idx))
+
+        diff = float(nanoseconds_above - nanoseconds_below)
+
+        # t is the proportion (in the range [0,1]) which we are interpolating from
+        # between the above and below readings. If time_in_ns is exactly equal to
+        # nanoseconds_below then t will equal zero, if it is equal to nanoseconds_above
+        # then t will be one.
+        t = (time_in_ns - nanoseconds_below) / diff
+
+        print "t = %f" % t
+
+        return (t * self[nano_below_idx]) + ((1.0 - t) * self[nano_above_idx])
 
 
 class CameraParams(object):
@@ -52,6 +133,38 @@ class CameraParams(object):
             return -1
 
 
+class RecordStartStop(TimestampedData):
+    def __init__(self, fname):
+        with open(fname, 'r') as f:
+            lines = f.readlines()
+
+        # Strip comments
+        lines = [l for l in lines if not l.startswith('//')]
+
+        if len(lines) != 2:
+            raise ValueError('was expecting 2 non-comment lines in %s' % fname)
+
+        start_line, end_line = lines
+
+        self.start_ns, self.start_ms_since_epoch, self.start_date = self._process(start_line)
+        self.end_ns, self.end_ms_since_epoch, self.end_state = self._process(end_line)
+
+        # Make an array
+        self.timestamps = np.array([self.start_ns, self.end_ns])
+
+    def _process(self, data_line):
+        event_type, time_in_ns, wallclock_since_epoch_ms, date = data_line.split("::")
+
+        if event_type not in ["Start", "Stop"]:
+            raise ValueError("a line in RecordingStartStop_ which begins with something other than 'Start' or 'Stop'")
+
+        # Cast the time values to integers
+        return int(time_in_ns), int(wallclock_since_epoch_ms), date
+
+    def __getitem__(self, key):
+        return self.timestamps[key]  # just return the NS value
+
+
 class Timestamped4Vec(TimestampedData):
     def __init__(self, fname):
         with open(fname, 'r') as f:
@@ -63,7 +176,10 @@ class Timestamped4Vec(TimestampedData):
         self.data = np.array([[float(f) for f in ts[1:]] for ts in split_lines],
                              dtype=np.float64)
 
-
+    def __getitem__(self, key):
+        # Allows us to index the object to get the relevant row of data,
+        # which is surely what we want.
+        return self.data[key, :]
 
 
 class TimestampedMtx(TimestampedData):
@@ -84,8 +200,12 @@ class TimestampedMtx(TimestampedData):
         self.timestamps = np.array(timestamps_int)
 
         # Build matrices then reshape to 4x4. FIXME: do we need to transform here?
-        self.matrices = [np.array([float(r) for r in mtx]) for mtx in rot_matrices_str]
-        self.matrices = [m.reshape(4, 4) for m in self.matrices]
+        self.data = [np.array([float(r) for r in mtx]) for mtx in rot_matrices_str]
+        self.data = [m.reshape(4, 4) for m in self.data]
+
+    def __getitem__(self, key):
+        # Return the relevant matrix
+        return self.data[key]
 
 
 class IMUSensorVideo(object):
@@ -126,9 +246,6 @@ class IMUSensorVideo(object):
             self.__dict__[python_name] = h
             self.sensor_files.append(h)
 
-    def load_video(self):
-        pass
-
     def all_times_passed(self):
         return [sf.total_time() for sf in self.sensor_files]
 
@@ -148,12 +265,13 @@ class HTC1XVid(IMUSensorVideo):
         ("Panasonic_Rotation_Vector_", "pan_rot_vec", Timestamped4Vec),
         ("RotationMatrix_", "rot", TimestampedMtx),
         ("RotationMatrixFromRotationVector_", "rot_from_vec", TimestampedMtx),
+        ("RecordingStartStop_", "video_timing", RecordStartStop),
         ("CameraParams_", "camera_params", CameraParams),
     ]
 
     def __init__(self, vid_filename):
         super(HTC1XVid, self).__init__(vid_filename)
 
-    def rotation_matrix_at_time(self, time_ns):
+    def rotation_matrix_at_time(self, time_in_ns):
         """Get the rotation matrix at the given time in ns"""
-        pass
+        return self.rot.interpolated_reading_at_time(time_in_ns)
